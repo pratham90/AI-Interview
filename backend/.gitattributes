@@ -1,0 +1,18 @@
+# Force LF for all text files
+* text=auto eol=lf
+
+# Python files - always LF
+*.py text eol=lf
+
+# Markdown / docs - always LF
+*.md text eol=lf
+
+# Config files - always LF
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+
+# Shell scripts - always LF
+*.sh text eol=lf

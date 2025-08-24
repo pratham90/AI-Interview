@@ -1,0 +1,7 @@
+pywebview
+flask
+requests
+PySide6
+numpy
+SpeechRecognition
+pyaudio

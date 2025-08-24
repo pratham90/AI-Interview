@@ -1,0 +1,113 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+venv/
+*.sqlite3
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Node/React
+node_modules/
+frontend/build/
+frontend/.env
+
+
+# PyInstaller/Build
+backend/build/
+backend/dist/
+*.spec
+
+# Allow all EXE files to be pushed
+!*.exe
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+
+# Uploads and output
+backend/uploads/
+*.log
+
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+dist/
+*.egg-info/
+
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+
+# Environments (ignore .env and venv everywhere)
+**/.env
+**/.venv/
+**/venv/
+ENV/
+env.bak/
+venv.bak/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secret keys and config
+.env
+
+# Audio/Video/Temp
+*.wav
+*.mp3
+*.mp4
+*.avi
+*.mov
+*.tmp
+*.log
+
+# PDF/Resume uploads
+*.pdf
+
+# Ignore test outputs
+*.out
+*.test
+
+# Ignore assets if not needed
+assets/
