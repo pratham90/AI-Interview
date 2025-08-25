@@ -18,25 +18,15 @@ from PySide6.QtWidgets import (
     QSlider
 )
 
-# =======================
-# Config
-# =======================
-BACKEND_URL = "http://127.0.0.1:5000"  # Local backend server
+BACKEND_URL = "http://127.0.0.1:5000"
 
-# =======================
-# Optional audio imports
-# =======================
 HAVE_SPEECH_RECOGNITION = True
 try:
     import speech_recognition as sr
 except Exception:
     HAVE_SPEECH_RECOGNITION = False
 
-# =======================
-# Helpers
-# =======================
 def glass(bg="rgba(0,0,0,0.5)"):
-    # subset of your CSS translated to Qt stylesheets
     return f"""
         background-color: {bg};
         border-radius: 18px;
@@ -135,9 +125,6 @@ def input_style():
         }
     """
 
-# =======================
-# Speech Recognition Thread
-# =======================
 class SpeechRecognitionThread(QThread):
     recognized = Signal(str)
     error = Signal(str)
@@ -160,31 +147,102 @@ class SpeechRecognitionThread(QThread):
             
             # Initialize recognizer and microphone with better noise handling
             self.recognizer = sr.Recognizer()
-            self.microphone = sr.Microphone()
             
-            # Enhanced noise reduction settings
-            self.recognizer.energy_threshold = 4000  # Higher threshold to ignore background noise
+            # Try to get available microphones and choose a real input
+            try:
+                mic_list = sr.Microphone.list_microphone_names()
+                print(f"[DEBUG] Available microphones: {mic_list}")
+
+                def is_virtual(name: str) -> bool:
+                    n = name.lower()
+                    virtual_terms = [
+                        'virtual', 'vb-audio', 'cable', 'stereo mix', 'mix', 'loopback',
+                        'what u hear', 'what-you-hear', 'wave out', 'output', 'speaker',
+                        'monitor of', 'line (voicemeeter', 'ndis', 'aux'
+                    ]
+                    return any(t in n for t in virtual_terms)
+
+                def score_device(name: str) -> int:
+                    # Higher score means more preferred
+                    n = name.lower()
+                    score = 0
+                    if any(k in n for k in ['headset', 'earphone', 'headphones']):
+                        score += 100
+                    if 'usb' in n:
+                        score += 80
+                    if any(k in n for k in ['mic', 'microphone', 'array']):
+                        score += 60
+                    if any(k in n for k in ['realtek', 'intel', 'high definition audio']):
+                        score += 20
+                    return score
+
+                candidates = [
+                    (idx, name, score_device(name))
+                    for idx, name in enumerate(mic_list)
+                    if not is_virtual(name)
+                ]
+
+                if candidates:
+                    # Prefer highest score, fall back to first non-virtual
+                    best = max(candidates, key=lambda x: x[2])
+                    chosen_index = best[0]
+                    chosen_name = best[1]
+                    self.microphone = sr.Microphone(device_index=chosen_index)
+                    print(f"[DEBUG] Using microphone: {chosen_name} (index {chosen_index})")
+                else:
+                    # As a fallback, use default constructor
+                    self.microphone = sr.Microphone()
+                    print("[DEBUG] No non-virtual mics detected; using default microphone")
+            except Exception as e:
+                print(f"[DEBUG] Microphone selection error: {e}")
+                self.microphone = sr.Microphone()
+            
+            # Ultra-sensitive settings for better speech capture
+            self.recognizer.energy_threshold = 100  # Very low threshold for maximum sensitivity
             self.recognizer.dynamic_energy_threshold = True  # Automatically adjust based on environment
-            self.recognizer.pause_threshold = 0.8  # Shorter pause to detect question boundaries
-            self.recognizer.non_speaking_duration = 0.5  # Shorter non-speaking duration
+            self.recognizer.pause_threshold = 1.0  # Longer pause to capture complete sentences
+            self.recognizer.non_speaking_duration = 0.8  # Longer non-speaking duration for natural speech
+            self.recognizer.phrase_threshold = 0.05  # Very low phrase threshold for better detection
             
             # Adjust for ambient noise with longer duration for better calibration
-            with self.microphone as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=2)
-                print(f"[DEBUG] Energy threshold set to: {self.recognizer.energy_threshold}")
+            try:
+                with self.microphone as source:
+                    print(f"[DEBUG] Adjusting for ambient noise...")
+                    self.recognizer.adjust_for_ambient_noise(source, duration=3)
+                    print(f"[DEBUG] Energy threshold set to: {self.recognizer.energy_threshold}")
+                    print(f"[DEBUG] Microphone initialized successfully")
+                    
+                    # Test microphone access
+                    print(f"[DEBUG] Testing microphone access...")
+                    test_audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=1)
+                    print(f"[DEBUG] Microphone access test successful")
+                    
+            except Exception as e:
+                print(f"[DEBUG] Ambient noise adjustment error: {e}")
+                # Continue with default settings
             
             self.listening_status.emit("Listening... Speak your question clearly!")
+            # Update microphone status to show it's active
+            if hasattr(self, 'mic_status'):
+                self.mic_status.setText("🎤 Microphone: Active 🎯")
+                self.mic_status.setStyleSheet("color:#4CAF50; font-size:12px; font-weight:600;")
+            
+            # Provide feedback about current sensitivity
+            print(f"[DEBUG] Microphone initialized with energy threshold: {self.recognizer.energy_threshold}")
+            print(f"[DEBUG] Pause threshold: {self.recognizer.pause_threshold}s")
+            print(f"[DEBUG] Non-speaking duration: {self.recognizer.non_speaking_duration}s")
             
             while self.running:
                 try:
                     with self.microphone as source:
                         print("[DEBUG] Listening for speech...")
+                        self.listening_status.emit("Listening... Speak now!")
                         
-                        # More lenient settings to capture more speech
+                        # Ultra-lenient settings to capture complete speech
                         audio = self.recognizer.listen(
                             source, 
-                            timeout=5,  # Increased timeout to capture more speech
-                            phrase_time_limit=15,  # Increased phrase limit for natural questions
+                            timeout=5,  # Longer timeout to capture complete sentences
+                            phrase_time_limit=20,  # Increased phrase limit for natural questions
                             snowboy_configuration=None  # Disable wake word detection
                         )
                     
@@ -201,18 +259,25 @@ class SpeechRecognitionThread(QThread):
                             language=self.language,
                             show_all=False  # Get only the best result
                         )
-                    except sr.RequestError:
+                        print(f"[DEBUG] Google recognition successful: '{text}'")
+                    except sr.RequestError as e:
+                        print(f"[DEBUG] Google recognition failed: {e}")
                         # Fallback to Sphinx if Google fails
                         try:
                             text = self.recognizer.recognize_sphinx(audio, language=self.language)
-                        except:
+                            print(f"[DEBUG] Sphinx fallback successful: '{text}'")
+                        except Exception as sphinx_error:
+                            print(f"[DEBUG] Sphinx fallback failed: {sphinx_error}")
                             text = ""
                     
                     if text and len(text.strip()) > 0:
                         print(f"[DEBUG] Recognized: '{text}'")
                         
-                        # Enhanced question detection - look for question patterns
-                        text_lower = text.lower().strip()
+                        # Check if speech was cut off and adjust sensitivity
+                        if len(text.strip()) < 10:  # Very short text might indicate cutoff
+                            print("[DEBUG] Short text detected, increasing sensitivity...")
+                            self.recognizer.energy_threshold = max(50, self.recognizer.energy_threshold - 50)
+                            print(f"[DEBUG] Adjusted energy threshold to: {self.recognizer.energy_threshold}")
                         
                         # Accept ALL speech - no filtering
                         is_question = True  # Accept everything the user says
@@ -231,7 +296,7 @@ class SpeechRecognitionThread(QThread):
                 except sr.WaitTimeoutError:
                     # No speech detected within timeout
                     if self.running:
-                        self.listening_status.emit("Listening...")
+                        self.listening_status.emit("Listening... (no speech detected)")
                     continue
                 except sr.UnknownValueError:
                     # Speech was unintelligible
@@ -241,12 +306,14 @@ class SpeechRecognitionThread(QThread):
                 except sr.RequestError as e:
                     # API request failed
                     print(f"[DEBUG] API request failed: {e}")
-                    self.error.emit(f"Speech recognition service error: {e}")
-                    break
+                    self.listening_status.emit(f"Speech recognition service error: {e}")
+                    # Don't break, just continue listening
+                    continue
                 except Exception as e:
                     print(f"[DEBUG] Speech recognition error: {e}")
-                    self.error.emit(f"Speech recognition error: {e}")
-                    break
+                    self.listening_status.emit(f"Speech recognition error: {e}")
+                    # Don't break, just continue listening
+                    continue
                     
         except Exception as e:
             self.error.emit(f"Failed to initialize speech recognition: {e}")
@@ -255,9 +322,6 @@ class SpeechRecognitionThread(QThread):
         self.running = False
 
 
-# =======================
-# Login/Signup View
-# =======================
 class AuthView(QWidget):
     authed = Signal(str, str, int)  # email, password, credits
 
@@ -377,9 +441,6 @@ class AuthView(QWidget):
             self.status.setText(f"Error: {e}")
 
 
-# =======================
-# Main View
-# =======================
 class MainView(QWidget):
     request_logout = Signal()
 
@@ -404,9 +465,9 @@ class MainView(QWidget):
         self._build()
         self._install_hotkeys()
 
-    # ----- UI Build -----
     def _build(self):
-        self.setMinimumSize(900, 500)  # Reduced height from 600 to 500
+        self.setMinimumSize(800, 400)
+        self.resize(900, 500)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -416,7 +477,7 @@ class MainView(QWidget):
         header = QFrame()
         header.setObjectName("header")
         header.setStyleSheet(header_style())
-        header.setFixedHeight(40)  # Reduced from 48 to 40
+        header.setFixedHeight(40)
         hl = QHBoxLayout(header)
         hl.setContentsMargins(16, 8, 16, 8)
         hl.setSpacing(10)
@@ -455,10 +516,10 @@ class MainView(QWidget):
         # Left (Questions + controls)
         left = QFrame()
         left.setStyleSheet("background-color: rgba(35,35,35,0.85); border-right: 1px solid #333;")
-        left.setMinimumWidth(400)  # Increased from 300 to 400
+        left.setMinimumWidth(300)
         ll = QVBoxLayout(left)
         ll.setContentsMargins(16, 16, 16, 16)
-        ll.setSpacing(8)  # Reduced from 10 to 8
+        ll.setSpacing(8)
 
         qh = QLabel("Questions")
         qh.setStyleSheet("font-weight: 600; font-size: 15px;")
@@ -470,10 +531,20 @@ class MainView(QWidget):
         self.questions_box.setStyleSheet(textedit_style())
         ll.addWidget(self.questions_box, 1)
 
+        # Listening controls
+        listen_controls = QHBoxLayout()
+        
         self.btn_listen = QPushButton("🎤 Start Listening")
         self.btn_listen.setStyleSheet(button_primary())
         self.btn_listen.clicked.connect(self._toggle_listening)
-        ll.addWidget(self.btn_listen)
+        listen_controls.addWidget(self.btn_listen)
+        
+        # Add microphone status indicator
+        self.mic_status = QLabel("🎤 Microphone: Ready")
+        self.mic_status.setStyleSheet("color:#4CAF50; font-size:12px; font-weight:600;")
+        listen_controls.addWidget(self.mic_status)
+        
+        ll.addLayout(listen_controls)
 
         self.listen_status = QLabel("Click to start listening")
         self.listen_status.setStyleSheet("color:#4CAF50; font-weight:700;")
@@ -487,9 +558,10 @@ class MainView(QWidget):
 
         tips = QLabel(
             "🎤 Voice: Click to listen | 📋 Smart: Alt+Shift+S | 📄 Upload: Alt+Shift+R\n"
-            "🖱️ Drag: Click header to move | ⌨️ Hide/Show: Alt+Shift+H | 🧪 Test: Alt+Shift+T\n"
+            "🖱️ Drag: Click anywhere to move | 🔄 Double-click to resize | ⌨️ Hide/Show: Alt+Shift+H\n"
             "💡 Smart Mode: Uses resume context for personalized answers, falls back to general advice\n"
-            "🗣️ Speak anything - all speech is accepted and sent to AI!"
+            "🗣️ Speak anything - all speech is accepted and sent to AI!\n"
+            "🔊 Speak clearly and at normal volume - system is now ultra-sensitive!"
         )
         tips.setStyleSheet("color:#aaa; font-size: 10px; line-height: 1.2; padding: 4px;")
         ll.addWidget(tips)
@@ -499,7 +571,7 @@ class MainView(QWidget):
         right.setStyleSheet("background-color: rgba(35,35,35,0.85);")
         rl = QVBoxLayout(right)
         rl.setContentsMargins(16, 16, 16, 16)
-        rl.setSpacing(8)  # Reduced from 10 to 8
+        rl.setSpacing(8)
 
         ah = QLabel("Answers")
         ah.setStyleSheet("font-weight: 600; font-size: 15px;")
@@ -537,18 +609,37 @@ class MainView(QWidget):
         """)
         rl.addWidget(self.answers_box, 1)
 
-        cl.addWidget(left, 1)  # Changed from 0 to 1 to give more space
+        cl.addWidget(left, 1)
         cl.addWidget(right, 1)
 
         root.addWidget(card, 1)
 
-        # Dragging (frameless)
+        # Add resize handle in bottom-right corner
+        self.resize_handle = QFrame()
+        self.resize_handle.setFixedSize(20, 20)
+        self.resize_handle.setStyleSheet("""
+            QFrame {
+                background-color: rgba(255,255,255,0.2);
+                border-radius: 10px;
+                cursor: se-resize;
+            }
+            QFrame:hover {
+                background-color: rgba(255,255,255,0.4);
+            }
+        """)
+        self.resize_handle.mousePressEvent = self._start_resize
+        self.resize_handle.mouseMoveEvent = self._resize_window
+        
+        # Position resize handle in bottom-right
+        resize_layout = QHBoxLayout()
+        resize_layout.addStretch()
+        resize_layout.addWidget(self.resize_handle)
+        root.addLayout(resize_layout)
+
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
-    # ----- Event handlers -----
     def mousePressEvent(self, e):
-        # Allow dragging from anywhere in the window
         if e.button() == Qt.LeftButton:
             try:
                 pos = e.globalPosition().toPoint()
@@ -559,6 +650,17 @@ class MainView(QWidget):
             e.accept()
         else:
             e.ignore()
+    
+    def mouseDoubleClickEvent(self, e):
+        """Double-click to toggle window size between default and full screen"""
+        if e.button() == Qt.LeftButton:
+            if self.size() == QSize(900, 500):
+                # Expand to larger size
+                self.resize(1200, 700)
+            else:
+                # Return to default size
+                self.resize(900, 500)
+            e.accept()
 
     def mouseMoveEvent(self, e):
         if e.buttons() == Qt.LeftButton and self._drag_pos is not None:
@@ -569,12 +671,39 @@ class MainView(QWidget):
             self.move(pos - self._drag_pos)
             e.accept()
 
+
+    
+    def _start_resize(self, e):
+        """Start resizing the window"""
+        if e.button() == Qt.LeftButton:
+            self._resize_start_pos = e.globalPosition().toPoint()
+            self._resize_start_size = self.size()
+            self.setCursor(Qt.SizeFDiagCursor)
+            e.accept()
+    
+    def _resize_window(self, e):
+        """Resize the window based on mouse movement"""
+        if hasattr(self, '_resize_start_pos') and hasattr(self, '_resize_start_size'):
+            delta = e.globalPosition().toPoint() - self._resize_start_pos
+            new_width = max(800, self._resize_start_size.width() + delta.x())
+            new_height = max(400, self._resize_start_size.height() + delta.y())
+            self.resize(new_width, new_height)
+            e.accept()
+    
     def mouseReleaseEvent(self, e):
+        """Handle mouse release for both dragging and resizing"""
+        # Handle dragging
         if self._drag_pos is not None:
             self._drag_pos = None
-            # Reset cursor
             self.setCursor(Qt.ArrowCursor)
-            e.accept()
+        
+        # Handle resizing
+        if hasattr(self, '_resize_start_pos'):
+            delattr(self, '_resize_start_pos')
+            delattr(self, '_resize_start_size')
+            self.setCursor(Qt.ArrowCursor)
+        
+        e.accept()
 
     def _hide_self(self):
         print("[DEBUG] Hide hotkey triggered!")
@@ -608,7 +737,6 @@ class MainView(QWidget):
             pass
         self.request_logout.emit()
 
-    # ----- Hotkeys -----
     def _install_hotkeys(self):
         # Alt+Shift+S -> Smart mode toggle
         sc_s = QShortcut(QKeySequence("Alt+Shift+S"), self)
@@ -639,7 +767,6 @@ class MainView(QWidget):
     def _install_hide_hotkey(self):
         pass  # No-op, handled globally in MainWindow
 
-    # ----- Features mapped from React -----
     def _toggle_smart(self):
         if not self.resume_path:
             QMessageBox.information(self, "Smart mode", "Please upload a resume before enabling Smart mode.")
@@ -724,21 +851,27 @@ class MainView(QWidget):
         print("[DEBUG] Test hotkey Alt+Shift+T pressed!")
         QMessageBox.information(self, "Hotkey Test", "Hotkey system is working! Alt+Shift+T pressed.")
 
-    # ----- Listening -----
+    # mic test code removed
+
     def _toggle_listening(self):
         if not HAVE_SPEECH_RECOGNITION:
             QMessageBox.warning(self, "Listening", "Speech not available. Install 'speech_recognition'.")
             return
 
         if self.listening:
+            # Stop listening
             self.listening = False
             self.btn_listen.setText("🎤 Start Listening")
             self.btn_listen.setStyleSheet(button_primary())
             self.listen_status.setText("Stopped listening.")
+            self.mic_status.setText("🎤 Microphone: Ready")
+            self.mic_status.setStyleSheet("color:#4CAF50; font-size:12px; font-weight:600;")
             if self.listener:
                 self.listener.stop()
                 self.listener.quit()
+                self.listener = None
         else:
+            # Start listening
             self.listening = True
             self.btn_listen.setText("⏹️ Stop Listening")
             self.btn_listen.setStyleSheet("""
@@ -758,14 +891,29 @@ class MainView(QWidget):
                     color: #888;
                 }
             """)
-            self.listen_status.setText("Listening...")
-            self.listener = SpeechRecognitionThread(language="en-US")
-            self.listener.recognized.connect(self._on_speech)
-            self.listener.error.connect(self._on_listen_error)
-            self.listener.listening_status.connect(self._on_listening_status)
-            self.listener.start()
+            self.listen_status.setText("Initializing microphone...")
+            self.mic_status.setText("🎤 Microphone: Initializing...")
+            self.mic_status.setStyleSheet("color:#FFA500; font-size:12px; font-weight:600;")
+            
+            # Create and start speech recognition thread
+            try:
+                self.listener = SpeechRecognitionThread(language="en-US", parent=self)
+                self.listener.recognized.connect(self._on_speech)
+                self.listener.error.connect(self._on_listen_error)
+                self.listener.listening_status.connect(self._on_listening_status)
+                self.listener.start()
+                print("[DEBUG] Speech recognition thread started")
+            except Exception as e:
+                print(f"[DEBUG] Failed to start speech recognition: {e}")
+                self.listen_status.setText(f"Failed to start: {str(e)}")
+                self.mic_status.setText("🎤 Microphone: Error ❌")
+                self.mic_status.setStyleSheet("color:#f44336; font-size:12px; font-weight:600;")
+                self.listening = False
+                self.btn_listen.setText("🎤 Start Listening")
+                self.btn_listen.setStyleSheet(button_primary())
 
     def _on_listen_error(self, msg):
+        print(f"[DEBUG] Speech recognition error: {msg}")
         self.listen_status.setText(f"Error: {msg}")
         self.listening = False
         self.btn_listen.setEnabled(True)
@@ -774,6 +922,7 @@ class MainView(QWidget):
         if self.listener:
             self.listener.stop()
             self.listener.quit()
+            self.listener = None
 
     def _on_listening_status(self, status):
         self.listen_status.setText(status)
@@ -801,7 +950,6 @@ class MainView(QWidget):
         # Send to AI
         self._ask_ai(text.strip())
 
-    # ----- Rendering -----
     def _render_questions(self):
         # newest first (matching your scroll-to-top in React)
         self.questions_box.clear()
@@ -902,7 +1050,6 @@ class MainView(QWidget):
         if self.ai_response:
             self.answers_box.append(self.ai_response)
 
-    # ----- Networking mapped from React -----
     def _conversation_history(self):
         # Interleave as in React (sent separately there, but we'll mimic order)
         hist = []
@@ -1052,44 +1199,11 @@ class MainView(QWidget):
 
 
 
-# =======================
-# Main Window (stack: Auth/Main)
-# =======================
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Live insights - PySide")
-        # Frameless and always on top
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowOpacity(0.95)
-
-        self.stack = QStackedWidget()
-        self.auth = AuthView()
-        self.auth.authed.connect(self._on_authed)
-        self.stack.addWidget(self.auth)
-
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.stack)
-
-        # Move window to a comfortable default position
-        self.resize(1000, 550)  # Reduced height from 650 to 550
-        self.move(60, 60)
-
-    def _on_authed(self, email, password, credits):
-        self.main = MainView(email, password, credits)
-        self.main.request_logout.connect(self._back_to_login)
-        if self.stack.count() == 2:
-            self.stack.removeWidget(self.stack.widget(1))
-        self.stack.addWidget(self.main)
-        self.stack.setCurrentWidget(self.main)
-
-    # Install global hotkey for hide/unhide that works even when hidden
-
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Live insights - PySide")
+        # Frameless but allows free movement and resizing
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setWindowOpacity(0.95)
@@ -1103,12 +1217,22 @@ class MainWindow(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(self.stack)
 
-        # Move window to a comfortable default position
-        self.resize(1000, 550)  # Reduced height from 650 to 550
+        # Set default size and position, but allow free movement and resizing
+        self.resize(900, 500)
         self.move(60, 60)
 
-        # Install global hotkey for hide/unhide that works even when hidden
+        # Install global hotkey for hide/unhide that works even when window is hidden
         self._install_global_hotkey()
+
+    def _on_authed(self, email, password, credits):
+        self.main = MainView(email, password, credits)
+        self.main.request_logout.connect(self._back_to_login)
+        if self.stack.count() == 2:
+            self.stack.removeWidget(self.stack.widget(1))
+        self.stack.addWidget(self.main)
+        self.stack.setCurrentWidget(self.main)
+
+    # Install global hotkey for hide/unhide that works even when hidden
 
     def _back_to_login(self):
         # clear session file already in MainView
@@ -1125,9 +1249,6 @@ class MainWindow(QWidget):
             self.main._hide_self()
 
 
-# =======================
-# Entry
-# =======================
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setApplicationName("Live insights")
