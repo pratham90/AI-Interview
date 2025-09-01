@@ -9,6 +9,7 @@ import wave
 import requests
 import numpy as np
 import re # Added for regex in _format_answer_for_interview
+import platform
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSize
 from PySide6.QtGui import QFont, QIcon, QAction, QShortcut, QKeySequence, QTextOption
@@ -18,7 +19,7 @@ from PySide6.QtWidgets import (
     QSlider
 )
 
-BACKEND_URL = "http://127.0.0.1:5000"
+BACKEND_URL = "https://ai-interview-416w.onrender.com"
 
 HAVE_SPEECH_RECOGNITION = True
 try:
@@ -48,7 +49,7 @@ def header_style():
         color: #fff;
         font-weight: 600;
         font-size: 16px;
-        cursor: move;
+        cursor: grab;
     """
 
 def textedit_style():
@@ -136,6 +137,12 @@ class SpeechRecognitionThread(QThread):
         self.running = False
         self.recognizer = None
         self.microphone = None
+        
+        # Platform-specific optimizations
+        self.platform = platform.system().lower()
+        self.is_windows = self.platform == "windows"
+        self.is_macos = self.platform == "darwin"
+        self.is_linux = self.platform == "linux"
 
     def run(self):
         if not HAVE_SPEECH_RECOGNITION:
@@ -143,16 +150,15 @@ class SpeechRecognitionThread(QThread):
             return
         try:
             self.running = True
-            self.listening_status.emit("Initializing speech recognition...")
+            self.listening_status.emit("Initializing...")
             
-            # Initialize recognizer and microphone with better noise handling
+            # Initialize recognizer and microphone with optimized settings
             self.recognizer = sr.Recognizer()
             
-            # Try to get available microphones and choose a real input
+            # Platform-specific microphone selection
             try:
                 mic_list = sr.Microphone.list_microphone_names()
-                print(f"[DEBUG] Available microphones: {mic_list}")
-
+                
                 def is_virtual(name: str) -> bool:
                     n = name.lower()
                     virtual_terms = [
@@ -163,17 +169,34 @@ class SpeechRecognitionThread(QThread):
                     return any(t in n for t in virtual_terms)
 
                 def score_device(name: str) -> int:
-                    # Higher score means more preferred
                     n = name.lower()
                     score = 0
-                    if any(k in n for k in ['headset', 'earphone', 'headphones']):
-                        score += 100
-                    if 'usb' in n:
-                        score += 80
-                    if any(k in n for k in ['mic', 'microphone', 'array']):
-                        score += 60
-                    if any(k in n for k in ['realtek', 'intel', 'high definition audio']):
-                        score += 20
+                    
+                    # Platform-specific scoring
+                    if self.is_windows:
+                        if any(k in n for k in ['headset', 'earphone', 'headphones']):
+                            score += 100
+                        if 'usb' in n:
+                            score += 80
+                        if any(k in n for k in ['mic', 'microphone', 'array']):
+                            score += 60
+                        if any(k in n for k in ['realtek', 'intel', 'high definition audio']):
+                            score += 20
+                    elif self.is_macos:
+                        if any(k in n for k in ['built-in', 'internal']):
+                            score += 90
+                        if any(k in n for k in ['headset', 'earphone', 'headphones']):
+                            score += 100
+                        if 'usb' in n:
+                            score += 70
+                    elif self.is_linux:
+                        if any(k in n for k in ['pulse', 'alsa']):
+                            score += 30
+                        if any(k in n for k in ['headset', 'earphone', 'headphones']):
+                            score += 100
+                        if 'usb' in n:
+                            score += 80
+                    
                     return score
 
                 candidates = [
@@ -183,136 +206,163 @@ class SpeechRecognitionThread(QThread):
                 ]
 
                 if candidates:
-                    # Prefer highest score, fall back to first non-virtual
                     best = max(candidates, key=lambda x: x[2])
                     chosen_index = best[0]
-                    chosen_name = best[1]
                     self.microphone = sr.Microphone(device_index=chosen_index)
-                    print(f"[DEBUG] Using microphone: {chosen_name} (index {chosen_index})")
                 else:
-                    # As a fallback, use default constructor
                     self.microphone = sr.Microphone()
-                    print("[DEBUG] No non-virtual mics detected; using default microphone")
             except Exception as e:
-                print(f"[DEBUG] Microphone selection error: {e}")
+                # Fallback to default microphone
                 self.microphone = sr.Microphone()
             
-            # Ultra-sensitive settings for better speech capture
-            self.recognizer.energy_threshold = 100  # Very low threshold for maximum sensitivity
-            self.recognizer.dynamic_energy_threshold = True  # Automatically adjust based on environment
-            self.recognizer.pause_threshold = 1.0  # Longer pause to capture complete sentences
-            self.recognizer.non_speaking_duration = 0.8  # Longer non-speaking duration for natural speech
-            self.recognizer.phrase_threshold = 0.05  # Very low phrase threshold for better detection
+            # Platform-specific optimized settings for continuous listening
+            if self.is_windows:
+                # Windows: More conservative settings for stability
+                self.recognizer.energy_threshold = 150
+                self.recognizer.pause_threshold = 1.5  # Increased to 1.5 seconds pause for natural speech
+                self.recognizer.non_speaking_duration = 1.0  # Increased to 1.0 seconds
+                self.recognizer.phrase_threshold = 0.1
+            elif self.is_macos:
+                # macOS: Balanced settings for good performance
+                self.recognizer.energy_threshold = 120
+                self.recognizer.pause_threshold = 1.2  # Increased to 1.2 seconds pause for natural speech
+                self.recognizer.non_speaking_duration = 0.8  # Increased to 0.8 seconds
+                self.recognizer.phrase_threshold = 0.05
+            elif self.is_linux:
+                # Linux: Aggressive settings for maximum speed
+                self.recognizer.energy_threshold = 80
+                self.recognizer.pause_threshold = 1.0  # Increased to 1.0 seconds pause for natural speech
+                self.recognizer.non_speaking_duration = 0.6  # Increased to 0.6 seconds
+                self.recognizer.phrase_threshold = 0.03
+            else:
+                # Default fallback
+                self.recognizer.energy_threshold = 100
+                self.recognizer.pause_threshold = 1.2  # Increased to 1.2 seconds pause for natural speech
+                self.recognizer.non_speaking_duration = 0.8  # Increased to 0.8 seconds
+                self.recognizer.phrase_threshold = 0.05
             
-            # Adjust for ambient noise with longer duration for better calibration
+            self.recognizer.dynamic_energy_threshold = True
+            
+            # Platform-specific ambient noise adjustment
             try:
                 with self.microphone as source:
-                    print(f"[DEBUG] Adjusting for ambient noise...")
-                    self.recognizer.adjust_for_ambient_noise(source, duration=3)
-                    print(f"[DEBUG] Energy threshold set to: {self.recognizer.energy_threshold}")
-                    print(f"[DEBUG] Microphone initialized successfully")
-                    
-                    # Test microphone access
-                    print(f"[DEBUG] Testing microphone access...")
-                    test_audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=1)
-                    print(f"[DEBUG] Microphone access test successful")
-                    
-            except Exception as e:
-                print(f"[DEBUG] Ambient noise adjustment error: {e}")
-                # Continue with default settings
+                    if self.is_windows:
+                        # Windows: Slightly longer adjustment for stability
+                        self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                    elif self.is_macos:
+                        # macOS: Balanced adjustment
+                        self.recognizer.adjust_for_ambient_noise(source, duration=0.2)
+                    elif self.is_linux:
+                        # Linux: Minimal adjustment for speed
+                        self.recognizer.adjust_for_ambient_noise(source, duration=0.1)
+                    else:
+                        # Default fallback
+                        self.recognizer.adjust_for_ambient_noise(source, duration=0.2)
+            except Exception:
+                pass
             
-            self.listening_status.emit("Listening... Speak your question clearly!")
-            # Update microphone status to show it's active
-            if hasattr(self, 'mic_status'):
-                self.mic_status.setText("🎤 Microphone: Active 🎯")
-                self.mic_status.setStyleSheet("color:#4CAF50; font-size:12px; font-weight:600;")
-            
-            # Provide feedback about current sensitivity
-            print(f"[DEBUG] Microphone initialized with energy threshold: {self.recognizer.energy_threshold}")
-            print(f"[DEBUG] Pause threshold: {self.recognizer.pause_threshold}s")
-            print(f"[DEBUG] Non-speaking duration: {self.recognizer.non_speaking_duration}s")
+            self.listening_status.emit("Ready! Speak now!")
             
             while self.running:
                 try:
                     with self.microphone as source:
-                        print("[DEBUG] Listening for speech...")
-                        self.listening_status.emit("Listening... Speak now!")
+                        self.listening_status.emit("Listening...")
                         
-                        # Ultra-lenient settings to capture complete speech
+                        # Platform-specific speech capture settings - Continuous listening mode
+                        if self.is_windows:
+                            # Windows: Continuous listening with very long timeouts
+                            timeout_val = 30  # 30 seconds to start listening
+                            phrase_limit = None  # No phrase limit - continuous listening
+                        elif self.is_macos:
+                            # macOS: Continuous listening with long timeouts
+                            timeout_val = 25  # 25 seconds to start listening
+                            phrase_limit = None  # No phrase limit - continuous listening
+                        elif self.is_linux:
+                            # Linux: Continuous listening with long timeouts
+                            timeout_val = 20  # 20 seconds to start listening
+                            phrase_limit = None  # No phrase limit - continuous listening
+                        else:
+                            # Default fallback: Continuous listening
+                            timeout_val = 25  # 25 seconds to start listening
+                            phrase_limit = None  # No phrase limit - continuous listening
+                        
                         audio = self.recognizer.listen(
                             source, 
-                            timeout=5,  # Longer timeout to capture complete sentences
-                            phrase_time_limit=20,  # Increased phrase limit for natural questions
-                            snowboy_configuration=None  # Disable wake word detection
+                            timeout=timeout_val,
+                            phrase_time_limit=phrase_limit,
+                            snowboy_configuration=None
                         )
                     
                     if not self.running:
                         break
                         
-                    self.listening_status.emit("Processing your speech...")
-                    print("[DEBUG] Processing audio...")
+                    self.listening_status.emit("Processing...")
                     
-                    # Use Google's speech recognition with better language model
+                    # Platform-optimized speech recognition
+                    text = ""
+                    
+                    # Try Google first (best quality)
                     try:
                         text = self.recognizer.recognize_google(
                             audio, 
                             language=self.language,
-                            show_all=False  # Get only the best result
+                            show_all=False
                         )
-                        print(f"[DEBUG] Google recognition successful: '{text}'")
-                    except sr.RequestError as e:
-                        print(f"[DEBUG] Google recognition failed: {e}")
-                        # Fallback to Sphinx if Google fails
+                    except sr.RequestError:
+                        # Google failed, try platform-specific fallbacks
+                        if self.is_windows:
+                            # Windows: Try Sphinx as fallback
+                            try:
+                                text = self.recognizer.recognize_sphinx(audio, language=self.language)
+                            except Exception:
+                                pass
+                        elif self.is_macos:
+                            # macOS: Try Sphinx with longer timeout
+                            try:
+                                text = self.recognizer.recognize_sphinx(audio, language=self.language)
+                            except Exception:
+                                pass
+                        elif self.is_linux:
+                            # Linux: Try multiple fallbacks
+                            try:
+                                text = self.recognizer.recognize_sphinx(audio, language=self.language)
+                            except Exception:
+                                try:
+                                    # Try local recognition if available
+                                    text = self.recognizer.recognize_sphinx(audio, language=self.language)
+                                except Exception:
+                                    pass
+                    
+                    # If all recognition methods failed, try one more time with different settings
+                    if not text:
                         try:
-                            text = self.recognizer.recognize_sphinx(audio, language=self.language)
-                            print(f"[DEBUG] Sphinx fallback successful: '{text}'")
-                        except Exception as sphinx_error:
-                            print(f"[DEBUG] Sphinx fallback failed: {sphinx_error}")
-                            text = ""
+                            # Adjust settings for better recognition
+                            original_threshold = self.recognizer.energy_threshold
+                            self.recognizer.energy_threshold = max(50, original_threshold - 50)
+                            text = self.recognizer.recognize_google(audio, language=self.language, show_all=False)
+                            self.recognizer.energy_threshold = original_threshold
+                        except Exception:
+                            pass
                     
                     if text and len(text.strip()) > 0:
-                        print(f"[DEBUG] Recognized: '{text}'")
-                        
-                        # Check if speech was cut off and adjust sensitivity
-                        if len(text.strip()) < 10:  # Very short text might indicate cutoff
-                            print("[DEBUG] Short text detected, increasing sensitivity...")
-                            self.recognizer.energy_threshold = max(50, self.recognizer.energy_threshold - 50)
-                            print(f"[DEBUG] Adjusted energy threshold to: {self.recognizer.energy_threshold}")
-                        
-                        # Accept ALL speech - no filtering
-                        is_question = True  # Accept everything the user says
-                        
-                        if is_question:
-                            print(f"[DEBUG] Question detected: '{text}'")
-                            self.recognized.emit(text.strip())
-                            self.listening_status.emit("Question received!")
-                        else:
-                            print(f"[DEBUG] Not a question, ignoring: '{text}'")
-                            self.listening_status.emit("Please ask a complete question...")
+                        # Accept all speech immediately
+                        self.recognized.emit(text.strip())
+                        self.listening_status.emit("Got it!")
                     else:
-                        print("[DEBUG] No text recognized")
                         self.listening_status.emit("Listening...")
                         
                 except sr.WaitTimeoutError:
-                    # No speech detected within timeout
                     if self.running:
-                        self.listening_status.emit("Listening... (no speech detected)")
+                        self.listening_status.emit("Listening...")
                     continue
                 except sr.UnknownValueError:
-                    # Speech was unintelligible
-                    print("[DEBUG] Speech was unintelligible")
-                    self.listening_status.emit("Please speak clearly...")
+                    self.listening_status.emit("Try again...")
                     continue
                 except sr.RequestError as e:
-                    # API request failed
-                    print(f"[DEBUG] API request failed: {e}")
-                    self.listening_status.emit(f"Speech recognition service error: {e}")
-                    # Don't break, just continue listening
+                    self.listening_status.emit("Service error, retrying...")
                     continue
                 except Exception as e:
-                    print(f"[DEBUG] Speech recognition error: {e}")
-                    self.listening_status.emit(f"Speech recognition error: {e}")
-                    # Don't break, just continue listening
+                    self.listening_status.emit("Error, retrying...")
                     continue
                     
         except Exception as e:
@@ -407,11 +457,11 @@ class AuthView(QWidget):
         self.status.setText("Logging in...")
         QApplication.processEvents()
         try:
-            r = requests.post(f"{BACKEND_URL}/login", json={"email": em, "password": pw}, timeout=12)
+            r = requests.post(f"{BACKEND_URL}/login", json={"email": em, "password": pw}, timeout=8)
             j = r.json()
             if j.get("success"):
                 # fetch credits
-                gc = requests.post(f"{BACKEND_URL}/get_credits", json={"email": em, "password": pw}, timeout=12).json()
+                gc = requests.post(f"{BACKEND_URL}/get_credits", json={"email": em, "password": pw}, timeout=8).json()
                 credits = gc.get("credits", 0)
                 # store session for 7 days
                 with open(os.path.expanduser("~/.live_insights_session.json"), "w") as fp:
@@ -431,7 +481,7 @@ class AuthView(QWidget):
         self.status.setText("Signing up...")
         QApplication.processEvents()
         try:
-            r = requests.post(f"{BACKEND_URL}/signup", json={"email": em, "password": pw}, timeout=12)
+            r = requests.post(f"{BACKEND_URL}/signup", json={"email": em, "password": pw}, timeout=8)
             j = r.json()
             if j.get("success"):
                 QMessageBox.information(self, "Signup", "Account created! Please log in.")
@@ -457,6 +507,16 @@ class MainView(QWidget):
         self.resume_path = None
         self.listening = False
         self.opacity = 0.95
+        
+        # Credit system: 1 credit for every 2 answers
+        self.answer_count = 0
+        self.answers_since_last_credit = 0
+        
+        # Platform detection for optimizations
+        self.platform = platform.system().lower()
+        self.is_windows = self.platform == "windows"
+        self.is_macos = self.platform == "darwin"
+        self.is_linux = self.platform == "linux"
 
         self.listener = None  # WhisperThread
         self._drag_pos = None
@@ -493,7 +553,7 @@ class MainView(QWidget):
 
         hl.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
 
-        self.credit_label = QLabel(f"Credits: {self.credits}")
+        self.credit_label = QLabel(f"Credits: {self.credits} ")
         self.credit_label.setStyleSheet("color: #4CAF50; font-weight: 700;")
         hl.addWidget(self.credit_label)
 
@@ -556,12 +616,28 @@ class MainView(QWidget):
         self.resume_status.setStyleSheet("color:#4CAF50; font-weight:600;")
         ll.addWidget(self.resume_status)
 
+        # Platform-specific hotkey tips
+        if self.is_windows:
+            smart_key = "Alt+Shift+S"
+            resume_key = "Alt+Shift+R"
+            hide_key = "Alt+Shift+H"
+        elif self.is_macos:
+            smart_key = "Cmd+Shift+S"
+            resume_key = "Cmd+Shift+R"
+            hide_key = "Cmd+Shift+H"
+        else:
+            smart_key = "Alt+Shift+S"
+            resume_key = "Alt+Shift+R"
+            hide_key = "Alt+Shift+H"
+        
         tips = QLabel(
-            "🎤 Voice: Click to listen | 📋 Smart: Alt+Shift+S | 📄 Upload: Alt+Shift+R\n"
-            "🖱️ Drag: Click anywhere to move | 🔄 Double-click to resize | ⌨️ Hide/Show: Alt+Shift+H\n"
+            f"🎤 Voice: Click to listen | 📋 Smart: {smart_key} | 📄 Upload: {resume_key}\n"
+            f"🖱️ Drag: Click anywhere to move | 🔄 Double-click to resize | ⌨️ Hide/Show: {hide_key}\n"
             "💡 Smart Mode: Uses resume context for personalized answers, falls back to general advice\n"
             "🗣️ Speak anything - all speech is accepted and sent to AI!\n"
-            "🔊 Speak clearly and at normal volume - system is now ultra-sensitive!"
+            "🔊 Speak clearly and at normal volume - system now listens CONTINUOUSLY!\n"
+            "⏱️ Long questions supported - speak naturally with pauses\n"
+            f"💳 Credits: 1 credit for every 2 genuine answers | 🖥️ Platform: {self.platform.title()}"
         )
         tips.setStyleSheet("color:#aaa; font-size: 10px; line-height: 1.2; padding: 4px;")
         ll.addWidget(tips)
@@ -618,14 +694,13 @@ class MainView(QWidget):
         self.resize_handle = QFrame()
         self.resize_handle.setFixedSize(20, 20)
         self.resize_handle.setStyleSheet("""
-            QFrame {
-                background-color: rgba(255,255,255,0.2);
-                border-radius: 10px;
-                cursor: se-resize;
-            }
-            QFrame:hover {
-                background-color: rgba(255,255,255,0.4);
-            }
+                    QFrame {
+            background-color: rgba(255,255,255,0.2);
+            border-radius: 10px;
+        }
+        QFrame:hover {
+            background-color: rgba(255,255,255,0.4);
+        }
         """)
         self.resize_handle.mousePressEvent = self._start_resize
         self.resize_handle.mouseMoveEvent = self._resize_window
@@ -650,6 +725,21 @@ class MainView(QWidget):
             e.accept()
         else:
             e.ignore()
+    
+    def mouseReleaseEvent(self, e):
+        """Handle mouse release for both dragging and resizing"""
+        # Handle dragging
+        if self._drag_pos is not None:
+            self._drag_pos = None
+            self.setCursor(Qt.ArrowCursor)
+        
+        # Handle resizing
+        if hasattr(self, '_resize_start_pos'):
+            delattr(self, '_resize_start_pos')
+            delattr(self, '_resize_start_size')
+            self.setCursor(Qt.ArrowCursor)
+        
+        e.accept()
     
     def mouseDoubleClickEvent(self, e):
         """Double-click to toggle window size between default and full screen"""
@@ -706,16 +796,21 @@ class MainView(QWidget):
         e.accept()
 
     def _hide_self(self):
-        print("[DEBUG] Hide hotkey triggered!")
+        # Platform-specific hide/show with appropriate hotkey display
+        if self.is_windows:
+            hide_key = "Alt+Shift+H"
+        elif self.is_macos:
+            hide_key = "Cmd+Shift+H"
+        else:
+            hide_key = "Alt+Shift+H"
+        
         # Toggle between hide and show
         if self.isVisible():
-            print("[DEBUG] Hiding window...")
             self.hide()
             # Store position before hiding for restoration
             self._stored_pos = self.pos()
-            self.listen_status.setText("Window hidden. Press Alt+Shift+H to show.")
+            self.listen_status.setText(f"Window hidden. Press {hide_key} to show.")
         else:
-            print("[DEBUG] Showing window...")
             self.show()
             # Restore position if we have a stored one
             if hasattr(self, '_stored_pos'):
@@ -727,7 +822,7 @@ class MainView(QWidget):
     def _logout(self):
         # mirror React: clear local + call /logout
         try:
-            requests.post(f"{BACKEND_URL}/logout", timeout=5)
+            requests.post(f"{BACKEND_URL}/logout", timeout=3)
         except Exception:
             pass
         # delete session file
@@ -738,32 +833,80 @@ class MainView(QWidget):
         self.request_logout.emit()
 
     def _install_hotkeys(self):
-        # Alt+Shift+S -> Smart mode toggle
-        sc_s = QShortcut(QKeySequence("Alt+Shift+S"), self)
-        sc_s.activated.connect(self._toggle_smart)
+        """Install platform-specific hotkeys with error handling"""
+        try:
+            # Platform-specific hotkey setup
+            if self.is_windows:
+                # Windows: Alt+Shift combinations
+                smart_key = "Alt+Shift+S"
+                resume_key = "Alt+Shift+R"
+                clear_key = "Alt+Shift+C"
+                quit_key = "Alt+Shift+Q"
+                listen_key = "Alt+Shift+L"
+                test_key = "Alt+Shift+T"
+            elif self.is_macos:
+                # macOS: Cmd+Shift combinations (more native)
+                smart_key = "Ctrl+Shift+S"
+                resume_key = "Ctrl+Shift+R"
+                clear_key = "Ctrl+Shift+C"
+                quit_key = "Ctrl+Shift+Q"
+                listen_key = "Ctrl+Shift+L"
+                test_key = "Ctrl+Shift+T"
+            else:
+                # Linux: Alt+Shift combinations
+                smart_key = "Alt+Shift+S"
+                resume_key = "Alt+Shift+R"
+                clear_key = "Alt+Shift+C"
+                quit_key = "Alt+Shift+Q"
+                listen_key = "Alt+Shift+L"
+                test_key = "Alt+Shift+T"
+            
+            # Smart mode toggle
+            sc_s = QShortcut(QKeySequence(smart_key), self)
+            sc_s.activated.connect(self._toggle_smart)
 
-        # Alt+Shift+R -> upload resume
-        sc_r = QShortcut(QKeySequence("Alt+Shift+R"), self)
-        sc_r.activated.connect(self._upload_resume)
+            # Upload resume
+            sc_r = QShortcut(QKeySequence(resume_key), self)
+            sc_r.activated.connect(self._upload_resume)
 
-        # Alt+Shift+C -> clear answers
-        sc_c = QShortcut(QKeySequence("Alt+Shift+C"), self)
-        sc_c.activated.connect(self._clear_answers)
+            # Clear answers
+            sc_c = QShortcut(QKeySequence(clear_key), self)
+            sc_c.activated.connect(self._clear_answers)
 
-    # (Hide hotkey now only registered globally in MainWindow)
+            # Quit application
+            sc_q = QShortcut(QKeySequence(quit_key), self)
+            sc_q.activated.connect(QApplication.quit)
 
-        # Alt+Shift+Q -> quit
-        sc_q = QShortcut(QKeySequence("Alt+Shift+Q"), self)
-        sc_q.activated.connect(QApplication.quit)
+            # Start listening
+            sc_l = QShortcut(QKeySequence(listen_key), self)
+            sc_l.activated.connect(self._toggle_listening)
+            
+            # Test hotkey
+            sc_test = QShortcut(QKeySequence(test_key), self)
+            sc_test.activated.connect(self._test_hotkey)
+            
+            # Store shortcuts for potential cleanup
+            self._hotkeys = [sc_s, sc_r, sc_c, sc_q, sc_l, sc_test]
+            
+        except Exception as e:
+            # Fallback to basic hotkeys if platform-specific ones fail
+            try:
+                # Basic fallback hotkeys
+                sc_s = QShortcut(QKeySequence("Ctrl+S"), self)
+                sc_s.activated.connect(self._toggle_smart)
+                
+                sc_r = QShortcut(QKeySequence("Ctrl+R"), self)
+                sc_r.activated.connect(self._upload_resume)
+                
+                sc_l = QShortcut(QKeySequence("Ctrl+L"), self)
+                sc_l.activated.connect(self._toggle_listening)
+                
+                self._hotkeys = [sc_s, sc_r, sc_l]
+                
+            except Exception as fallback_error:
+                # If even fallback fails, just continue without hotkeys
+                pass
 
-        # Start listening protection
-        sc_l = QShortcut(QKeySequence("Alt+Shift+L"), self)
-        sc_l.activated.connect(self._toggle_listening)
-        
-        # Test hotkey to verify system is working
-        sc_test = QShortcut(QKeySequence("Alt+Shift+T"), self)
-        sc_test.activated.connect(self._test_hotkey)
-    
     def _install_hide_hotkey(self):
         pass  # No-op, handled globally in MainWindow
 
@@ -811,9 +954,6 @@ class MainView(QWidget):
                     self.smart_mode = True
                     self.smart_label.setText("Smart mode: ON")
                     self.smart_label.setStyleSheet("color: #4CAF50; font-size:14px;")
-                    
-                print(f"[DEBUG] Resume uploaded successfully: {filename}")
-                print(f"[DEBUG] Resume preview: {resume_preview[:200]}...")
             else:
                 self.resume_status.setText("❌ Could not read resume content")
                 self.resume_status.setStyleSheet("color:#f44336; font-weight:600;")
@@ -821,7 +961,6 @@ class MainView(QWidget):
         except Exception as e:
             self.resume_status.setText(f"❌ Error processing resume: {str(e)}")
             self.resume_status.setStyleSheet("color:#f44336; font-weight:600;")
-            print(f"[DEBUG] Resume processing error: {e}")
 
     def _get_resume_preview(self, file_path):
         """Get a preview of resume content for validation"""
@@ -839,7 +978,6 @@ class MainView(QWidget):
                     else:
                         return None
         except Exception as e:
-            print(f"[DEBUG] Error reading resume preview: {e}")
             return None
     
     def _clear_answers(self):
@@ -848,7 +986,6 @@ class MainView(QWidget):
     
     def _test_hotkey(self):
         """Test method to verify hotkeys are working"""
-        print("[DEBUG] Test hotkey Alt+Shift+T pressed!")
         QMessageBox.information(self, "Hotkey Test", "Hotkey system is working! Alt+Shift+T pressed.")
 
     # mic test code removed
@@ -891,8 +1028,8 @@ class MainView(QWidget):
                     color: #888;
                 }
             """)
-            self.listen_status.setText("Initializing microphone...")
-            self.mic_status.setText("🎤 Microphone: Initializing...")
+            self.listen_status.setText("Starting...")
+            self.mic_status.setText("🎤 Microphone: Starting...")
             self.mic_status.setStyleSheet("color:#FFA500; font-size:12px; font-weight:600;")
             
             # Create and start speech recognition thread
@@ -902,9 +1039,7 @@ class MainView(QWidget):
                 self.listener.error.connect(self._on_listen_error)
                 self.listener.listening_status.connect(self._on_listening_status)
                 self.listener.start()
-                print("[DEBUG] Speech recognition thread started")
             except Exception as e:
-                print(f"[DEBUG] Failed to start speech recognition: {e}")
                 self.listen_status.setText(f"Failed to start: {str(e)}")
                 self.mic_status.setText("🎤 Microphone: Error ❌")
                 self.mic_status.setStyleSheet("color:#f44336; font-size:12px; font-weight:600;")
@@ -913,7 +1048,6 @@ class MainView(QWidget):
                 self.btn_listen.setStyleSheet(button_primary())
 
     def _on_listen_error(self, msg):
-        print(f"[DEBUG] Speech recognition error: {msg}")
         self.listen_status.setText(f"Error: {msg}")
         self.listening = False
         self.btn_listen.setEnabled(True)
@@ -928,14 +1062,9 @@ class MainView(QWidget):
         self.listen_status.setText(status)
 
     def _on_speech(self, text):
-        print(f"[DEBUG] Speech recognized: '{text}'")  # Debug output
-        
         # Accept ALL speech - no filtering or validation
         if not text or len(text.strip()) < 1:  # Only check if text exists
-            print("[DEBUG] No text recognized, ignoring")
             return
-        
-        print(f"[DEBUG] Accepting all speech: '{text}'")
         
         # Add the question to the list
         self.questions.insert(0, text.strip())
@@ -944,11 +1073,13 @@ class MainView(QWidget):
         # Clear answers - thinking will be shown by _ask_ai
         self.answers_box.clear()
         
-        # Force UI update
-        QApplication.processEvents()
-        
-        # Send to AI
+        # Send to AI immediately
         self._ask_ai(text.strip())
+        
+        # Automatically continue listening for the next question
+        if self.listening and self.listener and self.listener.running:
+            # The speech recognition thread will continue automatically
+            self.listen_status.setText("Listening for next question...")
 
     def _render_questions(self):
         # newest first (matching your scroll-to-top in React)
@@ -1069,7 +1200,6 @@ class MainView(QWidget):
 
     def _ask_ai(self, question):
         # mirrors askAI in React
-        print(f"[DEBUG] Sending question to AI: '{question}'")
         if self.credits <= 0:
             self.ai_response = "❌ No credits left. Please purchase more credits."
             self._render_answers()
@@ -1077,7 +1207,7 @@ class MainView(QWidget):
             return
             
         # Show thinking indicator
-        self.ai_response = "🤔 Thinking..."
+        self.ai_response = "🤔 Processing..."
         self._render_ai_response()
         QApplication.processEvents()  # Update UI immediately
         
@@ -1097,16 +1227,15 @@ class MainView(QWidget):
                 }
                 
                 self.listen_status.setText("🤖 Sending to AI (Smart Mode - Using Resume Context)...")
-                r = requests.post(f"{BACKEND_URL}/ask", files=files, data=data, timeout=90)
+                r = requests.post(f"{BACKEND_URL}/ask", files=files, data=data, timeout=45)
                 j = r.json()
-                print(f"[DEBUG] Full backend response (Smart Mode): {j}")
                 ans = j.get("answer") or "No response from AI."
-                print(f"[DEBUG] Received AI response (Smart Mode): '{ans[:100]}...'")
                 
                 # Check if answer was blocked due to template detection
                 if "[Error: The answer was blocked" in ans:
                     self.answers = [f"❌ {ans}"]
                     self.listen_status.setText("Answer blocked - please rephrase your question")
+                    # No credit deduction for blocked answers
                 elif "Could not extract any text" in ans:
                     self.answers = [f"❌ {ans}"]
                     self.smart_mode = False
@@ -1114,14 +1243,16 @@ class MainView(QWidget):
                     self.smart_label.setStyleSheet("color: #aaa; font-size:14px;")
                     self.resume_status.setText("❌ Resume text extraction failed")
                     self.resume_status.setStyleSheet("color:#f44336; font-weight:600;")
+                    # No credit deduction for failed answers
                 else:
                     # Success - answer based on resume context
                     self.answers = [ans]
                     self.listen_status.setText("✅ Resume-based answer received!")
+                    # Deduct credit only for genuine answers
+                    self._deduct_credit_for_genuine_answer()
                     
                 self.ai_response = ""
                 self._render_answers()
-                self._deduct_credit()
             else:
                 # Global mode
                 self.listen_status.setText("🌐 Sending to AI (Global Mode - General Interview Advice)...")
@@ -1132,23 +1263,23 @@ class MainView(QWidget):
                                       "resume": "",
                                       "mode": "global",
                                       "history": self._conversation_history()
-                                  }, timeout=60)
+                                  }, timeout=30)
                 j = r.json()
-                print(f"[DEBUG] Full backend response (Global): {j}")
                 ans = j.get("answer") or "No response from AI."
-                print(f"[DEBUG] Received AI response (Global): '{ans[:100]}...'")
                 
                 # Check if answer was blocked due to template detection
                 if "[Error: The answer was blocked" in ans:
                     self.answers = [f"❌ {ans}"]
                     self.listen_status.setText("Answer blocked - please rephrase your question")
+                    # No credit deduction for blocked answers
                 else:
                     self.answers = [ans]
                     self.listen_status.setText("✅ General interview advice received!")
+                    # Deduct credit only for genuine answers
+                    self._deduct_credit_for_genuine_answer()
                     
                 self.ai_response = ""
                 self._render_answers()
-                self._deduct_credit()
                 
             self.listen_status.setText("Response received!")
             
@@ -1168,33 +1299,50 @@ class MainView(QWidget):
             self._render_answers()
             self.listen_status.setText("Error occurred")
 
-    def _deduct_credit(self):
-        # mirrors React deductCredit()
-        try:
-            r = requests.post(f"{BACKEND_URL}/use_credit",
-                              json={"email": self.email, "password": self.password},
-                              timeout=12)
-            j = r.json()
-            if j.get("success") and isinstance(j.get("credits"), int):
-                self.credits = j["credits"]
-                self.credit_label.setText(f"Credits: {self.credits}")
-            else:
-                # fallback to get_credits
-                gc = requests.post(f"{BACKEND_URL}/get_credits",
-                                   json={"email": self.email, "password": self.password},
-                                   timeout=12).json()
-                self.credits = gc.get("credits", 0)
-                self.credit_label.setText(f"Credits: {self.credits}")
-        except Exception:
+    def _deduct_credit_for_genuine_answer(self):
+        """Deduct 1 credit for every 2 genuine answers generated"""
+        self.answers_since_last_credit += 1
+        
+        # Only deduct credit when we reach 2 answers
+        if self.answers_since_last_credit >= 2:
             try:
-                gc = requests.post(f"{BACKEND_URL}/get_credits",
-                                   json={"email": self.email, "password": self.password},
-                                   timeout=12).json()
-                self.credits = gc.get("credits", 0)
-                self.credit_label.setText(f"Credits: {self.credits}")
+                r = requests.post(f"{BACKEND_URL}/use_credit",
+                                  json={"email": self.email, "password": self.password},
+                                  timeout=8)
+                j = r.json()
+                if j.get("success") and isinstance(j.get("credits"), int):
+                    self.credits = j["credits"]
+                    self.credit_label.setText(f"Credits: {self.credits} (1 credit for 2 answers)")
+                else:
+                    # fallback to get_credits
+                    gc = requests.post(f"{BACKEND_URL}/get_credits",
+                                       json={"email": self.email, "password": self.password},
+                                       timeout=8).json()
+                    self.credits = gc.get("credits", 0)
+                    self.credit_label.setText(f"Credits: {self.credits} (1 credit for 2 answers)")
+                
+                # Reset counter after successful deduction
+                self.answers_since_last_credit = 0
+                
             except Exception:
-                self.credit_label.setText("Credits: Error")
-                pass
+                try:
+                    gc = requests.post(f"{BACKEND_URL}/get_credits",
+                                       json={"email": self.email, "password": self.password},
+                                       timeout=8).json()
+                    self.credits = gc.get("credits", 0)
+                    self.credit_label.setText(f"Credits: {self.credits} (1 credit for 2 answers)")
+                    self.answers_since_last_credit = 0
+                except Exception:
+                    self.credit_label.setText("Credits: Error")
+                    pass
+        else:
+            # Update credit label to show progress
+            remaining = 2 - self.answers_since_last_credit
+            self.credit_label.setText(f"Credits: {self.credits} ({remaining} more answer(s) for next credit)")
+
+    def _deduct_credit(self):
+        """Legacy method - kept for compatibility"""
+        self._deduct_credit_for_genuine_answer()
 
 
 
@@ -1203,10 +1351,29 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Live insights - PySide")
+        
+        # Platform-specific window settings
+        self.platform = platform.system().lower()
+        self.is_windows = self.platform == "windows"
+        self.is_macos = self.platform == "darwin"
+        self.is_linux = self.platform == "linux"
+        
         # Frameless but allows free movement and resizing
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setWindowOpacity(0.95)
+        if self.is_windows:
+            # Windows: Full frameless with transparency
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setWindowOpacity(0.95)
+        elif self.is_macos:
+            # macOS: Frameless with title bar for better compatibility
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setWindowOpacity(0.95)
+        else:
+            # Linux: Standard frameless
+            self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            self.setAttribute(Qt.WA_TranslucentBackground)
+            self.setWindowOpacity(0.95)
 
         self.stack = QStackedWidget()
         self.auth = AuthView()
@@ -1220,6 +1387,10 @@ class MainWindow(QWidget):
         # Set default size and position, but allow free movement and resizing
         self.resize(900, 500)
         self.move(60, 60)
+        
+        # Enable free window movement and resizing
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
 
         # Install global hotkey for hide/unhide that works even when window is hidden
         self._install_global_hotkey()
@@ -1239,8 +1410,17 @@ class MainWindow(QWidget):
         self.stack.setCurrentWidget(self.auth)
     
     def _install_global_hotkey(self):
-        """Install global hotkey for hide/unhide that works even when window is hidden"""
-        self.global_hide_hotkey = QShortcut(QKeySequence("Alt+Shift+H"), self)
+        """Install platform-specific global hotkeys"""
+        if self.is_windows:
+            # Windows: Use Alt+Shift+H
+            self.global_hide_hotkey = QShortcut(QKeySequence("Alt+Shift+H"), self)
+        elif self.is_macos:
+            # macOS: Use Cmd+Shift+H (more native)
+            self.global_hide_hotkey = QShortcut(QKeySequence("Ctrl+Shift+H"), self)
+        else:
+            # Linux: Use Alt+Shift+H
+            self.global_hide_hotkey = QShortcut(QKeySequence("Alt+Shift+H"), self)
+        
         self.global_hide_hotkey.activated.connect(self._global_hide_unhide)
     
     def _global_hide_unhide(self):

@@ -1,0 +1,31 @@
+# Cross-platform requirements for Live Insights AI Desktop App
+# This file ensures compatibility across Windows, macOS, and Linux
+
+# Core GUI framework - PySide6 works on all platforms
+PySide6>=6.5.0
+
+# Speech recognition - works on all platforms
+SpeechRecognition>=3.10.0
+
+# Audio processing dependencies
+PyAudio>=0.2.11; platform_system!="Linux"
+pyaudio>=0.2.11; platform_system=="Linux"
+
+# HTTP requests
+requests>=2.28.0
+
+# Scientific computing (optional but recommended)
+numpy>=1.21.0
+
+# For better audio handling on different platforms
+# Windows: No additional requirements
+# macOS: No additional requirements  
+# Linux: May need system packages: sudo apt-get install portaudio19-dev python3-pyaudio
+
+# Platform-specific notes:
+# Windows: Install Visual C++ Build Tools if PyAudio fails
+# macOS: May need Homebrew: brew install portaudio
+# Linux: Use package manager for system dependencies
+
+# Optional: For better speech recognition on Linux
+# pocketsphinx>=0.1.15; platform_system=="Linux"
