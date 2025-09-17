@@ -10,6 +10,8 @@ import requests
 import numpy as np
 import re # Added for regex in _format_answer_for_interview
 import platform
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from PySide6.QtCore import Qt, QTimer, QThread, Signal, QSize
 from PySide6.QtGui import QFont, QIcon, QAction, QShortcut, QKeySequence, QTextOption
@@ -18,14 +20,18 @@ from PySide6.QtWidgets import (
     QTextEdit, QFileDialog, QStackedWidget, QFrame, QMessageBox, QSizePolicy, QSpacerItem,
     QSlider
 )
+from concurrent.futures import ThreadPoolExecutor
 
-BACKEND_URL = "https://ai-interview-416w.onrender.com"
+BACKEND_URL = "http://127.0.0.1:5000"
 
 HAVE_SPEECH_RECOGNITION = True
 try:
     import speech_recognition as sr
 except Exception:
     HAVE_SPEECH_RECOGNITION = False
+
+# Background executor to keep UI and listener responsive
+_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="AI_BG")
 
 def glass(bg="rgba(0,0,0,0.5)"):
     return f"""
@@ -144,6 +150,19 @@ class SpeechRecognitionThread(QThread):
         self.is_macos = self.platform == "darwin"
         self.is_linux = self.platform == "linux"
 
+        # Buffering for long/structured answers
+        self._buffer_text = ""
+        self._last_speech_ts = 0.0
+        self._utterance_start_ts = 0.0
+        # Adaptive silence thresholds
+        self._short_silence_sec = 1.5   # acceptable pause within an utterance
+        self._final_silence_sec = 3.3   # decisive end-of-utterance pause
+        self._confirm_pause_sec = 0.7   # extra wait to confirm completion (default)
+        self._pending_finalize_since = 0.0
+        self._recalibrate_every_sec = 60.0
+        self._last_recalibrate_ts = 0.0
+        self._max_utterance_sec = 75.0  # hard cap to avoid waiting forever
+
     def run(self):
         if not HAVE_SPEECH_RECOGNITION:
             self.error.emit("Speech Recognition not available. Install 'speech_recognition'.")
@@ -152,10 +171,15 @@ class SpeechRecognitionThread(QThread):
             self.running = True
             self.listening_status.emit("Initializing...")
             
-            # Initialize recognizer and microphone with optimized settings
+            # Initialize recognizer and microphone with balanced, interview-friendly settings
             self.recognizer = sr.Recognizer()
+            # Balanced settings per requirements
+            self.recognizer.pause_threshold = 1.5
+            self.recognizer.non_speaking_duration = 0.85
+            self.recognizer.phrase_threshold = 0.08
+            self.recognizer.dynamic_energy_threshold = True
             
-            # Platform-specific microphone selection
+            # Microphone selection (best available)
             try:
                 mic_list = sr.Microphone.list_microphone_names()
                 
@@ -171,32 +195,14 @@ class SpeechRecognitionThread(QThread):
                 def score_device(name: str) -> int:
                     n = name.lower()
                     score = 0
-                    
-                    # Platform-specific scoring
-                    if self.is_windows:
-                        if any(k in n for k in ['headset', 'earphone', 'headphones']):
-                            score += 100
-                        if 'usb' in n:
-                            score += 80
-                        if any(k in n for k in ['mic', 'microphone', 'array']):
-                            score += 60
-                        if any(k in n for k in ['realtek', 'intel', 'high definition audio']):
-                            score += 20
-                    elif self.is_macos:
-                        if any(k in n for k in ['built-in', 'internal']):
-                            score += 90
-                        if any(k in n for k in ['headset', 'earphone', 'headphones']):
-                            score += 100
-                        if 'usb' in n:
-                            score += 70
-                    elif self.is_linux:
-                        if any(k in n for k in ['pulse', 'alsa']):
-                            score += 30
-                        if any(k in n for k in ['headset', 'earphone', 'headphones']):
-                            score += 100
-                        if 'usb' in n:
-                            score += 80
-                    
+                    if any(k in n for k in ['mic', 'microphone', 'array', 'headset']):
+                        score += 100
+                    if 'usb' in n:
+                        score += 50
+                    if any(k in n for k in ['realtek', 'intel', 'high definition audio', 'built-in', 'internal']):
+                        score += 20
+                    if 'headphones' in n and 'mic' not in n and 'microphone' not in n:
+                        score -= 60
                     return score
 
                 candidates = [
@@ -211,85 +217,42 @@ class SpeechRecognitionThread(QThread):
                     self.microphone = sr.Microphone(device_index=chosen_index)
                 else:
                     self.microphone = sr.Microphone()
-            except Exception as e:
+            except Exception:
                 # Fallback to default microphone
                 self.microphone = sr.Microphone()
             
-            # Platform-specific optimized settings for continuous listening
-            if self.is_windows:
-                # Windows: More conservative settings for stability
-                self.recognizer.energy_threshold = 150
-                self.recognizer.pause_threshold = 1.5  # Increased to 1.5 seconds pause for natural speech
-                self.recognizer.non_speaking_duration = 1.0  # Increased to 1.0 seconds
-                self.recognizer.phrase_threshold = 0.1
-            elif self.is_macos:
-                # macOS: Balanced settings for good performance
-                self.recognizer.energy_threshold = 120
-                self.recognizer.pause_threshold = 1.2  # Increased to 1.2 seconds pause for natural speech
-                self.recognizer.non_speaking_duration = 0.8  # Increased to 0.8 seconds
-                self.recognizer.phrase_threshold = 0.05
-            elif self.is_linux:
-                # Linux: Aggressive settings for maximum speed
-                self.recognizer.energy_threshold = 80
-                self.recognizer.pause_threshold = 1.0  # Increased to 1.0 seconds pause for natural speech
-                self.recognizer.non_speaking_duration = 0.6  # Increased to 0.6 seconds
-                self.recognizer.phrase_threshold = 0.03
-            else:
-                # Default fallback
-                self.recognizer.energy_threshold = 100
-                self.recognizer.pause_threshold = 1.2  # Increased to 1.2 seconds pause for natural speech
-                self.recognizer.non_speaking_duration = 0.8  # Increased to 0.8 seconds
-                self.recognizer.phrase_threshold = 0.05
-            
-            self.recognizer.dynamic_energy_threshold = True
-            
-            # Platform-specific ambient noise adjustment
+            # Initial ambient noise calibration
             try:
                 with self.microphone as source:
-                    if self.is_windows:
-                        # Windows: Slightly longer adjustment for stability
-                        self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
-                    elif self.is_macos:
-                        # macOS: Balanced adjustment
-                        self.recognizer.adjust_for_ambient_noise(source, duration=0.2)
-                    elif self.is_linux:
-                        # Linux: Minimal adjustment for speed
-                        self.recognizer.adjust_for_ambient_noise(source, duration=0.1)
-                    else:
-                        # Default fallback
-                        self.recognizer.adjust_for_ambient_noise(source, duration=0.2)
+                    self.recognizer.adjust_for_ambient_noise(source, duration=0.6)
             except Exception:
                 pass
+            self._last_recalibrate_ts = time.time()
+            self._utterance_start_ts = 0.0
             
             self.listening_status.emit("Ready! Speak now!")
             
+            # Continuous loop: short timeout for start-of-speech detection, no phrase limit
             while self.running:
                 try:
+                    now = time.time()
+                    # Periodic re-calibration in long sessions
+                    if now - self._last_recalibrate_ts > self._recalibrate_every_sec:
+                        try:
+                            with self.microphone as source:
+                                self.listening_status.emit("Adjusting for ambient noise...")
+                                self.recognizer.adjust_for_ambient_noise(source, duration=0.4)
+                            self._last_recalibrate_ts = time.time()
+                        except Exception:
+                            pass
+
                     with self.microphone as source:
                         self.listening_status.emit("Listening...")
-                        
-                        # Platform-specific speech capture settings - Continuous listening mode
-                        if self.is_windows:
-                            # Windows: Continuous listening with very long timeouts
-                            timeout_val = 30  # 30 seconds to start listening
-                            phrase_limit = None  # No phrase limit - continuous listening
-                        elif self.is_macos:
-                            # macOS: Continuous listening with long timeouts
-                            timeout_val = 25  # 25 seconds to start listening
-                            phrase_limit = None  # No phrase limit - continuous listening
-                        elif self.is_linux:
-                            # Linux: Continuous listening with long timeouts
-                            timeout_val = 20  # 20 seconds to start listening
-                            phrase_limit = None  # No phrase limit - continuous listening
-                        else:
-                            # Default fallback: Continuous listening
-                            timeout_val = 25  # 25 seconds to start listening
-                            phrase_limit = None  # No phrase limit - continuous listening
-                        
+                        # Short timeout to detect start of speech quickly, no phrase limit to allow long answers
                         audio = self.recognizer.listen(
-                            source, 
-                            timeout=timeout_val,
-                            phrase_time_limit=phrase_limit,
+                            source,
+                            timeout=0.9,
+                            phrase_time_limit=None,
                             snowboy_configuration=None
                         )
                     
@@ -298,65 +261,69 @@ class SpeechRecognitionThread(QThread):
                         
                     self.listening_status.emit("Processing...")
                     
-                    # Platform-optimized speech recognition
                     text = ""
-                    
-                    # Try Google first (best quality)
+                    # Google first with alternatives
                     try:
-                        text = self.recognizer.recognize_google(
-                            audio, 
-                            language=self.language,
-                            show_all=False
-                        )
-                    except sr.RequestError:
-                        # Google failed, try platform-specific fallbacks
-                        if self.is_windows:
-                            # Windows: Try Sphinx as fallback
-                            try:
-                                text = self.recognizer.recognize_sphinx(audio, language=self.language)
-                            except Exception:
-                                pass
-                        elif self.is_macos:
-                            # macOS: Try Sphinx with longer timeout
-                            try:
-                                text = self.recognizer.recognize_sphinx(audio, language=self.language)
-                            except Exception:
-                                pass
-                        elif self.is_linux:
-                            # Linux: Try multiple fallbacks
-                            try:
-                                text = self.recognizer.recognize_sphinx(audio, language=self.language)
-                            except Exception:
-                                try:
-                                    # Try local recognition if available
-                                    text = self.recognizer.recognize_sphinx(audio, language=self.language)
-                                except Exception:
-                                    pass
-                    
-                    # If all recognition methods failed, try one more time with different settings
-                    if not text:
-                        try:
-                            # Adjust settings for better recognition
-                            original_threshold = self.recognizer.energy_threshold
-                            self.recognizer.energy_threshold = max(50, original_threshold - 50)
+                        result = self.recognizer.recognize_google(audio, language=self.language, show_all=True)
+                        if isinstance(result, dict) and 'alternative' in result:
+                            best_alt = None
+                            best_score = -1.0
+                            for alt in result['alternative']:
+                                transcript = alt.get('transcript', '')
+                                conf = float(alt.get('confidence', 0.0)) if 'confidence' in alt else 0.0
+                                score = conf if conf > 0 else (len(transcript) / 120.0)
+                                if transcript and score > best_score:
+                                    best_score = score
+                                    best_alt = transcript
+                            if best_alt:
+                                text = best_alt
+                        elif isinstance(result, str):
+                            text = result
+                        else:
+                            # fallback: try non-show_all
                             text = self.recognizer.recognize_google(audio, language=self.language, show_all=False)
-                            self.recognizer.energy_threshold = original_threshold
+                    except sr.UnknownValueError:
+                        # Try Sphinx as offline fallback
+                        try:
+                            text = self.recognizer.recognize_sphinx(audio, language=self.language)
                         except Exception:
-                            pass
+                            text = ""
+                    except sr.RequestError:
+                        # Network issue, try Sphinx
+                        try:
+                            text = self.recognizer.recognize_sphinx(audio, language=self.language)
+                        except Exception:
+                            text = ""
+                    except Exception:
+                        text = ""
                     
-                    if text and len(text.strip()) > 0:
-                        # Accept all speech immediately
-                        self.recognized.emit(text.strip())
-                        self.listening_status.emit("Got it!")
-                    else:
-                        self.listening_status.emit("Listening...")
-                        
+                    text = (text or "").strip()
+                    if text:
+                        # Start utterance timing on first segment
+                        if self._utterance_start_ts == 0.0:
+                            self._utterance_start_ts = time.time()
+                        # Update buffer and timestamp; avoid naive duplicate concatenation
+                        if self._buffer_text:
+                            self._buffer_text = self._merge_transcript(self._buffer_text, text)
+                        else:
+                            self._buffer_text = text
+                        self._last_speech_ts = time.time()
+                        # Any new speech cancels pending finalization
+                        self._pending_finalize_since = 0.0
+                        self.listening_status.emit("Captured segment...")
+                    
+                    # Decide whether to finalize based on silence and utterance characteristics
+                    self._maybe_finalize()
+                    
                 except sr.WaitTimeoutError:
-                    if self.running:
+                    # No speech detected during this short window; check finalize conditions
+                    self._maybe_finalize()
+                    if not self._buffer_text:
                         self.listening_status.emit("Listening...")
                     continue
                 except sr.UnknownValueError:
-                    self.listening_status.emit("Try again...")
+                    # Inaudible; keep listening but also check if buffer should finalize
+                    self._maybe_finalize()
                     continue
                 except sr.RequestError as e:
                     self.listening_status.emit("Service error, retrying...")
@@ -368,8 +335,94 @@ class SpeechRecognitionThread(QThread):
         except Exception as e:
             self.error.emit(f"Failed to initialize speech recognition: {e}")
 
+    def _maybe_finalize(self):
+        now = time.time()
+        has_buffer = bool(self._buffer_text and self._last_speech_ts > 0)
+        if not has_buffer:
+            return
+        silence = now - self._last_speech_ts
+        utterance_duration = (now - self._utterance_start_ts) if self._utterance_start_ts > 0 else 0.0
+        words = len(self._buffer_text.split())
+        ends_sentence = any(self._buffer_text.strip().endswith(p) for p in ["?", ".", "!", ":"]) or \
+                        any(k in self._buffer_text.lower() for k in ["thank you", "that's it", "that's all"]) 
+        # Fast-path for short questions
+        txt_lower = self._buffer_text.strip().lower()
+        question_starters = (
+            "what ", "why ", "how ", "is ", "are ", "can ", "does ", "do ", "did ",
+            "will ", "would ", "should ", "could ", "tell me ", "explain ", "when ", "where ", "which "
+        )
+        starts_like_question = any(txt_lower.startswith(qw) for qw in question_starters)
+        ends_qmark = txt_lower.endswith("?")
+        is_short_question = (words <= 8) or starts_like_question or ends_qmark
+
+        # Finalization policy with confirmation window:
+        # - If long utterance (>= 10 words) and pause >= short_silence -> candidate finalize
+        # - If clear sentence/question end and pause >= 1.0s -> candidate finalize
+        # - If strong pause >= final_silence regardless of length -> candidate finalize
+        # - If max utterance duration exceeded -> candidate finalize
+        candidate = (
+            (words >= 10 and silence >= self._short_silence_sec) or
+            (ends_sentence and silence >= 0.75) or
+            (silence >= self._final_silence_sec) or
+            (utterance_duration >= self._max_utterance_sec)
+        )
+        # Short-question candidate: finalize faster after ~0.9s pause
+        candidate_short = is_short_question and (silence >= 0.55)
+        candidate = candidate or candidate_short
+
+        if candidate:
+            # Start or check confirmation window
+            if self._pending_finalize_since == 0.0:
+                self._pending_finalize_since = now
+                # Inform user we're waiting for completion
+                self.listening_status.emit("Waiting for question completion…")
+                return
+            # Shorter confirmation window for short questions
+            confirm_hold = 0.22 if is_short_question else self._confirm_pause_sec
+            if (now - self._pending_finalize_since) < confirm_hold:
+                # Still confirming
+                return
+
+            # Confirmed finalize
+            final_text = self._buffer_text.strip()
+            self._buffer_text = ""
+            self._utterance_start_ts = 0.0
+            self._pending_finalize_since = 0.0
+            if final_text:
+                self.recognized.emit(final_text)
+                self.listening_status.emit("Got it!")
+
+    def _merge_transcript(self, existing: str, new_part: str) -> str:
+        """Merge ASR segments, removing simple overlaps to improve accuracy."""
+        existing = existing.strip()
+        new_part = new_part.strip()
+        if not existing:
+            return new_part
+        if not new_part:
+            return existing
+        # If new part is fully contained, keep existing
+        if new_part in existing:
+            return existing
+        # If existing is contained in new part, take new
+        if existing in new_part:
+            return new_part
+        # Attempt overlap merge based on suffix/prefix match
+        max_overlap = min(20, len(existing), len(new_part))
+        for k in range(max_overlap, 0, -1):
+            if existing.endswith(new_part[:k]):
+                return (existing + new_part[k:]).strip()
+        # No overlap: concatenate with space
+        return (existing + " " + new_part).strip()
+
     def stop(self):
         self.running = False
+        # If there's buffered speech, emit it once on stop
+        if self._buffer_text:
+            final_text = self._buffer_text.strip()
+            self._buffer_text = ""
+            self._utterance_start_ts = 0.0
+            if final_text:
+                self.recognized.emit(final_text)
 
 
 class AuthView(QWidget):
@@ -492,6 +545,8 @@ class AuthView(QWidget):
 
 
 class MainView(QWidget):
+    # Marshal background-thread updates safely to the UI thread
+    ai_update = Signal(dict)
     request_logout = Signal()
 
     def __init__(self, email, password, credits):
@@ -522,6 +577,16 @@ class MainView(QWidget):
         self._drag_pos = None
 
         self.setStyleSheet(glass())
+
+        # Connect background updates to UI-thread slot
+        self.ai_update.connect(self._apply_ai_update)
+
+        # Persistent HTTP session for faster requests
+        self._session = requests.Session()
+        retries = Retry(total=2, backoff_factor=0.2, status_forcelist=[429, 502, 503, 504])
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=retries)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
         self._build()
         self._install_hotkeys()
 
@@ -632,12 +697,9 @@ class MainView(QWidget):
         
         tips = QLabel(
             f"🎤 Voice: Click to listen | 📋 Smart: {smart_key} | 📄 Upload: {resume_key}\n"
-            f"🖱️ Drag: Click anywhere to move | 🔄 Double-click to resize | ⌨️ Hide/Show: {hide_key}\n"
-            "💡 Smart Mode: Uses resume context for personalized answers, falls back to general advice\n"
-            "🗣️ Speak anything - all speech is accepted and sent to AI!\n"
-            "🔊 Speak clearly and at normal volume - system now listens CONTINUOUSLY!\n"
-            "⏱️ Long questions supported - speak naturally with pauses\n"
-            f"💳 Credits: 1 credit for every 2 genuine answers | 🖥️ Platform: {self.platform.title()}"
+            f"🖱️ Drag: Click anywhere to move| ⌨️ Hide/Show: {hide_key}\n"
+            "💡 Smart Mode: Uses resume context for personalized answers\n"
+            f" 🖥️ Platform: {self.platform.title()}"
         )
         tips.setStyleSheet("color:#aaa; font-size: 10px; line-height: 1.2; padding: 4px;")
         ll.addWidget(tips)
@@ -1181,21 +1243,16 @@ class MainView(QWidget):
         if self.ai_response:
             self.answers_box.append(self.ai_response)
 
-    def _conversation_history(self):
-        # Interleave as in React (sent separately there, but we'll mimic order)
+    def _conversation_history(self, max_messages=6):
+        # Interleave as in React; limit to recent to shrink payload
         hist = []
-        # Build from oldest to newest based on what we have stored
-        # Our local lists hold newest at index 0 because we insert(0,...).
-        q_rev = list(reversed(self.questions))
-        a_rev = list(reversed(self.answers))
-        
-        # Create conversation history in chronological order
+        q_rev = list(reversed(self.questions))[:max_messages]
+        a_rev = list(reversed(self.answers))[:max_messages]
         for i in range(max(len(q_rev), len(a_rev))):
             if i < len(q_rev):
                 hist.append({"role": "user", "content": q_rev[i]})
             if i < len(a_rev):
                 hist.append({"role": "assistant", "content": a_rev[i]})
-        
         return hist
 
     def _ask_ai(self, question):
@@ -1211,6 +1268,10 @@ class MainView(QWidget):
         self._render_ai_response()
         QApplication.processEvents()  # Update UI immediately
         
+        # offload network request to background to keep listening continuous
+        _executor.submit(self._process_ai_request, question)
+
+    def _process_ai_request(self, question):
         # prepare request (smart vs global)
         try:
             if self.smart_mode and self.resume_path:
@@ -1225,124 +1286,165 @@ class MainView(QWidget):
                     "mode": "resume",
                     "history": json.dumps(self._conversation_history())
                 }
-                
-                self.listen_status.setText("🤖 Sending to AI (Smart Mode - Using Resume Context)...")
-                r = requests.post(f"{BACKEND_URL}/ask", files=files, data=data, timeout=45)
+                # Inform UI from background via signal
+                self.ai_update.emit({"listen_status": "🤖 Sending to AI (Smart Mode - Using Resume Context)..."})
+                # Faster, persistent session with moderate timeout
+                r = self._session.post(f"{BACKEND_URL}/ask", files=files, data=data, timeout=35)
                 j = r.json()
                 ans = j.get("answer") or "No response from AI."
                 
                 # Check if answer was blocked due to template detection
                 if "[Error: The answer was blocked" in ans:
-                    self.answers = [f"❌ {ans}"]
-                    self.listen_status.setText("Answer blocked - please rephrase your question")
-                    # No credit deduction for blocked answers
+                    self.ai_update.emit({
+                        "answers": [f"❌ {ans}"],
+                        "ai_response": "",
+                        "listen_status": "Answer blocked - please rephrase your question"
+                    })
                 elif "Could not extract any text" in ans:
-                    self.answers = [f"❌ {ans}"]
-                    self.smart_mode = False
-                    self.smart_label.setText("Smart mode: OFF")
-                    self.smart_label.setStyleSheet("color: #aaa; font-size:14px;")
-                    self.resume_status.setText("❌ Resume text extraction failed")
-                    self.resume_status.setStyleSheet("color:#f44336; font-weight:600;")
-                    # No credit deduction for failed answers
+                    self.ai_update.emit({
+                        "answers": [f"❌ {ans}"],
+                        "ai_response": "",
+                        "smart_mode": False,
+                        "smart_label_text": "Smart mode: OFF",
+                        "smart_label_style": "color: #aaa; font-size:14px;",
+                        "resume_status_text": "❌ Resume text extraction failed",
+                        "resume_status_style": "color:#f44336; font-weight:600;"
+                    })
                 else:
                     # Success - answer based on resume context
-                    self.answers = [ans]
-                    self.listen_status.setText("✅ Resume-based answer received!")
-                    # Deduct credit only for genuine answers
-                    self._deduct_credit_for_genuine_answer()
-                    
-                self.ai_response = ""
-                self._render_answers()
+                    self.ai_update.emit({
+                        "answers": [ans],
+                        "ai_response": "",
+                        "listen_status": "✅ Resume-based answer received!"
+                    })
+                    # Deduct credit only for genuine answers in background
+                    _executor.submit(self._deduct_credit_for_genuine_answer_bg)
             else:
                 # Global mode
-                self.listen_status.setText("🌐 Sending to AI (Global Mode - General Interview Advice)...")
-                r = requests.post(f"{BACKEND_URL}/ask",
+                self.ai_update.emit({"listen_status": "🌐 Sending to AI (Global Mode - General Interview Advice)..."})
+                r = self._session.post(f"{BACKEND_URL}/ask",
                                   json={
                                       "question": question,
                                       "email": self.email,
                                       "resume": "",
                                       "mode": "global",
-                                      "history": self._conversation_history()
-                                  }, timeout=30)
+                                      "history": self._conversation_history(max_messages=6)
+                                  }, timeout=20)
                 j = r.json()
                 ans = j.get("answer") or "No response from AI."
                 
-                # Check if answer was blocked due to template detection
                 if "[Error: The answer was blocked" in ans:
-                    self.answers = [f"❌ {ans}"]
-                    self.listen_status.setText("Answer blocked - please rephrase your question")
-                    # No credit deduction for blocked answers
+                    self.ai_update.emit({
+                        "answers": [f"❌ {ans}"],
+                        "ai_response": "",
+                        "listen_status": "Answer blocked - please rephrase your question"
+                    })
                 else:
-                    self.answers = [ans]
-                    self.listen_status.setText("✅ General interview advice received!")
-                    # Deduct credit only for genuine answers
-                    self._deduct_credit_for_genuine_answer()
-                    
-                self.ai_response = ""
-                self._render_answers()
+                    self.ai_update.emit({
+                        "answers": [ans],
+                        "ai_response": "",
+                        "listen_status": "✅ General interview advice received!"
+                    })
+                    _executor.submit(self._deduct_credit_for_genuine_answer_bg)
                 
-            self.listen_status.setText("Response received!")
+            self.ai_update.emit({"listen_status": "Response received!"})
             
         except requests.exceptions.Timeout:
-            self.answers = ["⏰ Request timed out. Please try again."]
-            self.ai_response = ""
-            self._render_answers()
-            self.listen_status.setText("Timeout error")
+            self.ai_update.emit({
+                "answers": ["⏰ Request timed out. Please try again."],
+                "ai_response": "",
+                "listen_status": "Timeout error"
+            })
         except requests.exceptions.ConnectionError:
-            self.answers = ["🔌 Connection error. Please check if the backend server is running."]
-            self.ai_response = ""
-            self._render_answers()
-            self.listen_status.setText("Connection error")
+            self.ai_update.emit({
+                "answers": ["🔌 Connection error. Please check if the backend server is running."],
+                "ai_response": "",
+                "listen_status": "Connection error"
+            })
         except Exception as e:
-            self.answers = [f"❌ Error: {str(e)}"]
-            self.ai_response = ""
-            self._render_answers()
-            self.listen_status.setText("Error occurred")
+            self.ai_update.emit({
+                "answers": [f"❌ Error: {str(e)}"],
+                "ai_response": "",
+                "listen_status": "Error occurred"
+            })
 
-    def _deduct_credit_for_genuine_answer(self):
-        """Deduct 1 credit for every 2 genuine answers generated"""
-        self.answers_since_last_credit += 1
-        
-        # Only deduct credit when we reach 2 answers
-        if self.answers_since_last_credit >= 2:
+    def _apply_ai_update(self, data):
+        """Apply updates coming from background threads on the UI thread."""
+        if not isinstance(data, dict):
+            return
+        if "listen_status" in data:
+            self.listen_status.setText(data["listen_status"])
+        if "ai_response" in data:
+            self.ai_response = data["ai_response"]
+        if "answers" in data:
+            self.answers = data["answers"]
+            self._render_answers()
+        if "smart_mode" in data:
+            self.smart_mode = bool(data["smart_mode"]) 
+        if "smart_label_text" in data:
+            self.smart_label.setText(data["smart_label_text"]) 
+        if "smart_label_style" in data:
+            self.smart_label.setStyleSheet(data["smart_label_style"]) 
+        if "resume_status_text" in data:
+            self.resume_status.setText(data["resume_status_text"]) 
+        if "resume_status_style" in data:
+            self.resume_status.setStyleSheet(data["resume_status_style"]) 
+        if "credits" in data:
+            self.credits = int(data["credits"]) 
+        if "credit_label_text" in data:
+            self.credit_label.setText(data["credit_label_text"]) 
+        if "answers_since_last_credit" in data:
+            self.answers_since_last_credit = int(data["answers_since_last_credit"]) 
+
+    def _deduct_credit_for_genuine_answer_bg(self):
+        """Background-safe credit deduction; emits UI updates instead of touching widgets."""
+        # increment locally and prepare UI update for progress
+        new_count = self.answers_since_last_credit + 1
+        if new_count < 2:
+            self.ai_update.emit({
+                "answers_since_last_credit": new_count,
+                "credit_label_text": f"Credits: {self.credits} ({2 - new_count} more answer(s) for next credit)"
+            })
+            return
+
+        # Reached 2 answers: attempt to deduct on backend
+        try:
+            r = requests.post(f"{BACKEND_URL}/use_credit",
+                              json={"email": self.email, "password": self.password},
+                              timeout=8)
+            j = r.json()
+            if j.get("success") and isinstance(j.get("credits"), int):
+                new_credits = j["credits"]
+            else:
+                gc = requests.post(f"{BACKEND_URL}/get_credits",
+                                   json={"email": self.email, "password": self.password},
+                                   timeout=8).json()
+                new_credits = gc.get("credits", 0)
+            # Emit UI updates
+            self.ai_update.emit({
+                "credits": new_credits,
+                "credit_label_text": f"Credits: {new_credits} (1 credit for 2 answers)",
+                "answers_since_last_credit": 0
+            })
+        except Exception:
             try:
-                r = requests.post(f"{BACKEND_URL}/use_credit",
-                                  json={"email": self.email, "password": self.password},
-                                  timeout=8)
-                j = r.json()
-                if j.get("success") and isinstance(j.get("credits"), int):
-                    self.credits = j["credits"]
-                    self.credit_label.setText(f"Credits: {self.credits} (1 credit for 2 answers)")
-                else:
-                    # fallback to get_credits
-                    gc = requests.post(f"{BACKEND_URL}/get_credits",
-                                       json={"email": self.email, "password": self.password},
-                                       timeout=8).json()
-                    self.credits = gc.get("credits", 0)
-                    self.credit_label.setText(f"Credits: {self.credits} (1 credit for 2 answers)")
-                
-                # Reset counter after successful deduction
-                self.answers_since_last_credit = 0
-                
+                gc = requests.post(f"{BACKEND_URL}/get_credits",
+                                   json={"email": self.email, "password": self.password},
+                                   timeout=8).json()
+                new_credits = gc.get("credits", 0)
+                self.ai_update.emit({
+                    "credits": new_credits,
+                    "credit_label_text": f"Credits: {new_credits} (1 credit for 2 answers)",
+                    "answers_since_last_credit": 0
+                })
             except Exception:
-                try:
-                    gc = requests.post(f"{BACKEND_URL}/get_credits",
-                                       json={"email": self.email, "password": self.password},
-                                       timeout=8).json()
-                    self.credits = gc.get("credits", 0)
-                    self.credit_label.setText(f"Credits: {self.credits} (1 credit for 2 answers)")
-                    self.answers_since_last_credit = 0
-                except Exception:
-                    self.credit_label.setText("Credits: Error")
-                    pass
-        else:
-            # Update credit label to show progress
-            remaining = 2 - self.answers_since_last_credit
-            self.credit_label.setText(f"Credits: {self.credits} ({remaining} more answer(s) for next credit)")
+                self.ai_update.emit({
+                    "credit_label_text": "Credits: Error"
+                })
 
     def _deduct_credit(self):
         """Legacy method - kept for compatibility"""
-        self._deduct_credit_for_genuine_answer()
+        _executor.submit(self._deduct_credit_for_genuine_answer_bg)
 
 
 
